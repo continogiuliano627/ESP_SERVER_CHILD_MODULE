@@ -10,7 +10,7 @@
 #define FLAG_ADDR 132
 #define CONFIG_FLAG 0xA5
 #define LED_PIN 2  //1:off 0:on
-#define AP_SSID "ESP_01"
+#define AP_SSID "ESP01_01"
 #define AP_PASS "ESP40637184"
 #define MQTT_USER "backend"
 #define MQTT_PASS "2207"
@@ -40,7 +40,9 @@ bool ledState = true;       //off
 unsigned long ledLast = 0;  //sin iniciar
 unsigned long ledInterval = 0;
 unsigned long lastWifiTry = 0;
+unsigned long lastWifiScan = 0;
 unsigned long lastMqttTry = 0;
+bool staEnabled = false;
 
 PinState pins[PIN_COUNT] = {
   { A0, PIN_ANALOG, 0 },
@@ -221,11 +223,11 @@ void loadDeviceId() {
   sprintf(deviceId, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-void handleLed() {
-  if (ledInterval <= 0) return;
-
+void handleLed(unsigned long int interval = ledInterval) {
+  if (interval <= 0 && ledInterval <= 0) return;
+  if (interval <= 0) interval = ledInterval;
   unsigned long now = millis();
-  if ((now - ledLast) >= ledInterval) {
+  if ((now - ledLast) >= interval) {
     ledLast = now;
     ledState = !ledState;
     digitalWrite(LED_PIN, ledState ? LOW : HIGH);
@@ -270,6 +272,13 @@ int readPin(int pin) {
 }
 
 // ### WI-FI
+bool isNetworkAvailable() {
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == String(ssid)) return true;
+  }
+  return false;
+}
 
 bool validSSID() {
   int len = strlen(ssid);
@@ -369,13 +378,14 @@ const char PAGE[] PROGMEM = R"rawliteral(
     </html>
   )rawliteral";
 
+
 void handleRoot() {
   String page = FPSTR(PAGE);
   page.replace("{{ID}}", deviceId);
   server.send(200, "text/html", page);
 }
 
-void connectSTA() {
+/*void connectSTA() {
   WiFi.begin(ssid, pass);
   unsigned long t0 = millis();
   bool connected = false;
@@ -405,6 +415,13 @@ void connectSTA() {
     digitalWrite(LED_PIN, 0);
   }
   initMqtt();
+}*/
+
+void startSTA() {
+  WiFi.begin(ssid, pass);
+  staEnabled = true;
+  lastWifiTry = millis();
+  Serial.println("STA attempt started");
 }
 
 void saveConfig() {
@@ -450,7 +467,7 @@ void setup() {
 
   if (isConfigured() && validSSID()) {
     setLedBlink(333);
-    connectSTA();
+    startSTA();
   } else {
     Serial.println("\nSSID invalido. STA bloqueado.");
     setLedBlink(0);
@@ -464,21 +481,35 @@ void setup() {
 }
 
 void loop() {
-  handleLed();
   server.handleClient();
-  if (WiFi.status() == WL_CONNECTED) {
-    if (!mqtt.connected()) {
-      if (millis() - lastMqttTry > 5000) {
-        lastMqttTry = millis();
-        Serial.println("Retrying MQTT...");
-        if (mqtt.connect(deviceId, MQTT_USER, MQTT_PASS)) {
-          mqtt.subscribe(MQTT_TOPIC);
-          mqttReady = true;
-          Serial.println("MQTT reconnected");
+  if (isConfigured() && validSSID()) {
+    if (WiFi.status() != WL_CONNECTED) {
+      handleLed(1500);
+      if (millis() - lastWifiScan > 7500) {
+        lastWifiScan = millis();
+        if (isNetworkAvailable()) {
+          Serial.println("Target ssid found. Retrying STA...");
+          startSTA();
+        } else {
+          Serial.println("Target SSID not found");
         }
       }
     } else {
-      mqtt.loop();
+      if (!mqtt.connected()) {
+        initMqtt();
+        handleLed(3000);
+        if (millis() - lastMqttTry > 5000) {
+          lastMqttTry = millis();
+          if (mqtt.connect(deviceId, MQTT_USER, MQTT_PASS)) {
+            mqtt.subscribe(MQTT_TOPIC);
+            mqttReady = true;
+            Serial.println("MQTT connected");
+          }
+        }
+      } else {
+        if (digitalRead(2) == LOW) digitalWrite(2, HIGH);
+        mqtt.loop();
+      }
     }
   }
 }
