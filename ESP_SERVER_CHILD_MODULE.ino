@@ -224,6 +224,12 @@ void loadDeviceId() {
 }
 
 void handleLed(unsigned long int interval = ledInterval) {
+  if (interval == -1) {
+    digitalWrite(2, HIGH);
+    interval = 0;
+    ledInterval = 0;
+    return;
+  }
   if (interval <= 0 && ledInterval <= 0) return;
   if (interval <= 0) interval = ledInterval;
   unsigned long now = millis();
@@ -385,38 +391,6 @@ void handleRoot() {
   server.send(200, "text/html", page);
 }
 
-/*void connectSTA() {
-  WiFi.begin(ssid, pass);
-  unsigned long t0 = millis();
-  bool connected = false;
-  digitalWrite(LED_PIN, 0);
-  Serial.print("Connecting to SSID: ");
-  Serial.println(ssid);
-  Serial.print("With password: ");
-  Serial.println(pass);
-  Serial.print("...");
-
-  while (millis() - t0 < 15000 && !connected) {
-    if (WiFi.status() != WL_CONNECTED) {
-      delay(200);
-      Serial.print(".");
-    } else {
-      connected = true;
-      Serial.println("\nConectado");
-      Serial.print("Device MAC: ");
-      Serial.println(deviceId);
-      setLedBlink(0);
-      digitalWrite(LED_PIN, 1);  //led off
-    }
-  }
-  if (!connected) {
-    Serial.println("\nSTA failed, staying in AP mode");
-    setLedBlink(0);
-    digitalWrite(LED_PIN, 0);
-  }
-  initMqtt();
-}*/
-
 void startSTA() {
   WiFi.begin(ssid, pass);
   staEnabled = true;
@@ -504,10 +478,10 @@ void loop() {
             mqtt.subscribe(MQTT_TOPIC);
             mqttReady = true;
             Serial.println("MQTT connected");
+            handleLed(-1);
           }
         }
       } else {
-        if (digitalRead(2) == LOW) digitalWrite(2, HIGH);
         mqtt.loop();
       }
     }
