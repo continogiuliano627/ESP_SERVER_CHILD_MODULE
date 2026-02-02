@@ -63,6 +63,9 @@ PinState pins[PIN_COUNT] = {
   { 1, PIN_UNUSED, 0 },
 };
 
+const char* availablePins[] = { "A0", "2" };
+const size_t availablePinsCount = sizeof(availablePins) / sizeof(availablePins[0]);
+
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 bool mqttReady = false;
@@ -111,6 +114,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   onMqttMessage(msg);
 }
 
+bool isPinAvailable(const char* pinStr) {
+  for (size_t i = 0; i < availablePinsCount; i++) {
+    if (strcmp(pinStr, availablePins[i]) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void onMqttMessage(const char* json) {
   char id[18];
   char action[16];
@@ -128,7 +140,16 @@ void onMqttMessage(const char* json) {
     Serial.print("Reporting this device as: ");
     Serial.println(deviceId);
     char out[64];
-    sprintf(out, "{\"id\":\"report\",\"device\":\"%s\"}", deviceId);
+    char pinsBuffer[128] = { 0 };
+    strcat(pinsBuffer, "[");
+    for (size_t i = 0; i < availablePinsCount; i++) {
+      strcat(pinsBuffer, "\"");
+      strcat(pinsBuffer, availablePins[i]);
+      strcat(pinsBuffer, "\"");
+      if (i < availablePinsCount - 1) strcat(pinsBuffer, ",");
+    }
+    strcat(pinsBuffer, "]");
+    sprintf(out, "{\"id\":\"report\",\"device\":\"%s\",\"pins\":%s}", deviceId, pinsBuffer);
     mqttSend(out);
     return;
   }
@@ -153,6 +174,17 @@ void onMqttMessage(const char* json) {
   PinState* p = getPin(pin);
   if (!p) return;
 
+  /* ######## VARIFY ########*/
+
+  if (!isPinAvailable(pinStr)) {
+    char out[128];
+    sprintf(out,
+            "{\"id\":\"%s\",\"action\":\"error\",\"pin\":\"%s\",\"error\":\"unavailable_pin\"}",
+            deviceId,
+            pinStr);
+    mqttSend(out);
+    return;
+  }
   /* ######## READ ########*/
 
   if (strcmp(action, "read") == 0) {
