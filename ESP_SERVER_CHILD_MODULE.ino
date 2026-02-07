@@ -1,4 +1,5 @@
 // ### INCLUDE'S ### //
+#include "DHT.h"
 #include <ESP8266WiFi.h>
 #include <EEPROM.h>
 #include <ESP8266WebServer.h>
@@ -16,6 +17,8 @@
 #define MQTT_PASS "2207"
 #define MQTT_TOPIC "ESP_COM"
 #define PIN_COUNT 16
+#define DHTPIN 12
+#define DHTTYPE DHT11
 
 enum PinModeType {
   PIN_UNUSED = 0,
@@ -38,11 +41,15 @@ char deviceId[18];  //For local usage
 
 bool ledState = true;       //off
 unsigned long ledLast = 0;  //sin iniciar
-unsigned long ledInterval = 0;
-unsigned long lastWifiTry = 0;
+unsigned long int ledInterval = 0;
 unsigned long lastWifiScan = 0;
 unsigned long lastMqttTry = 0;
-bool staEnabled = false;
+unsigned long lastDht11Read = 0;
+bool invalidConfig = false;
+float lastDht11ValueTemp = 0;
+float lastDht11ValueHumidity = 0;
+bool staSuccess = false;
+bool mqttStarted = false;
 
 PinState pins[PIN_COUNT] = {
   { A0, PIN_ANALOG, 0 },
@@ -63,7 +70,7 @@ PinState pins[PIN_COUNT] = {
   { 1, PIN_UNUSED, 0 },
 };
 
-const char* availablePins[] = { "A0", "2" };
+const char* availablePins[] = { "A0: analog", "2: LED", "12: DHT11" };
 const size_t availablePinsCount = sizeof(availablePins) / sizeof(availablePins[0]);
 
 WiFiClient espClient;
@@ -71,7 +78,7 @@ PubSubClient mqtt(espClient);
 bool mqttReady = false;
 
 ESP8266WebServer server(80);  //WebServer for AP configuration
-
+DHT dht(DHTPIN, DHTTYPE);
 // ### Global functions ### //
 
 // ### MQTT
@@ -106,6 +113,7 @@ bool validMqttIp() {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  (void)topic;
   static char msg[256];
 
   if (length >= sizeof(msg)) length = sizeof(msg) - 1;
@@ -139,7 +147,7 @@ void onMqttMessage(const char* json) {
   if (strcmp(id, "device_report") == 0) {
     Serial.print("Reporting this device as: ");
     Serial.println(deviceId);
-    char out[64];
+    char out[192];
     char pinsBuffer[128] = { 0 };
     strcat(pinsBuffer, "[");
     for (size_t i = 0; i < availablePinsCount; i++) {
@@ -164,6 +172,7 @@ void onMqttMessage(const char* json) {
     Serial.println("Cannot get action");
     return;
   }
+  if ((strcmp("update", action) == 0)) return;
   if (!jsonGet(json, "value", valueStr, sizeof(valueStr))) {
     Serial.println("Cannot get value");
     return;
@@ -256,7 +265,7 @@ void loadDeviceId() {
 }
 
 void handleLed(unsigned long int interval = ledInterval) {
-  if (interval == -1) {
+  if (int(interval) == -1) {
     digitalWrite(2, HIGH);
     interval = 0;
     ledInterval = 0;
@@ -264,16 +273,12 @@ void handleLed(unsigned long int interval = ledInterval) {
   }
   if (interval <= 0 && ledInterval <= 0) return;
   if (interval <= 0) interval = ledInterval;
-  unsigned long now = millis();
+  unsigned long int now = millis();
   if ((now - ledLast) >= interval) {
     ledLast = now;
     ledState = !ledState;
     digitalWrite(LED_PIN, ledState ? LOW : HIGH);
   }
-}
-
-void setLedBlink(int ms) {
-  ledInterval = ms;
 }
 
 PinState* getPin(int p) {
@@ -387,7 +392,7 @@ void dumpEEPROM() {
   Serial.print("FLAG: ");
   Serial.println(EEPROM.read(132), HEX);
 }
-// WEB SERVER:
+// ### WEB SERVER:
 const char PAGE[] PROGMEM = R"rawliteral(
     <!DOCTYPE html>
     <html>
@@ -423,13 +428,6 @@ void handleRoot() {
   server.send(200, "text/html", page);
 }
 
-void startSTA() {
-  WiFi.begin(ssid, pass);
-  staEnabled = true;
-  lastWifiTry = millis();
-  Serial.println("STA attempt started");
-}
-
 void saveConfig() {
   memset(ssid, 0, sizeof(ssid));
   memset(pass, 0, sizeof(pass));
@@ -457,6 +455,45 @@ void saveMqttIp() {
 
   server.send(200, "text/plain", "OK");
 }
+
+// ### DeviceModules
+
+void dht11Read() {
+  if (millis() - lastDht11Read < 5000) return;  //aun no pasaron 5 seg desde la ultima lectura
+  lastDht11Read = millis();
+
+  float currentTemp = dht.readTemperature();
+  float currentHum = dht.readHumidity();
+
+  if (isnan(currentTemp) || isnan(currentHum)) {  //hubo error leyendo algun dato
+    Serial.println("DHT read failed.");
+    return;
+  }
+
+  if (abs(currentTemp - lastDht11ValueTemp) > float(0.25)) {
+    lastDht11ValueTemp = currentTemp;
+
+    char tempStr[16];
+    dtostrf(currentTemp, 0, 2, tempStr);
+
+    char msg[160];
+    sprintf(msg, "{\"id\":\"%s\", \"action\":\"update\",\"pin\":\"12\",\"value\":{\"temp\":%s}}", deviceId, tempStr);
+    mqttSend(msg);
+  }
+
+
+  if (abs(currentHum - lastDht11ValueHumidity) > float(1.0)) {
+    lastDht11ValueHumidity = currentHum;
+
+    char humStr[16];
+    dtostrf(currentHum, 0, 1, humStr);
+
+    char msg[160];
+    sprintf(msg, "{\"id\":\"%s\", \"action\":\"update\",\"pin\":\"12\",\"value\":{\"hum\":%s}}", deviceId, humStr);
+    mqttSend(msg);
+  }
+}
+
 // ### Running code ### //
 
 void setup() {
@@ -464,7 +501,7 @@ void setup() {
   Serial.println("\nESP STARTED");
   EEPROM.begin(EEPROM_SIZE);
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(2, HIGH);
+  digitalWrite(LED_PIN, HIGH);
 
   setupWiFi();
   loadDeviceId();
@@ -472,14 +509,17 @@ void setup() {
   dumpEEPROM();
 
   if (isConfigured() && validSSID()) {
-    setLedBlink(333);
-    startSTA();
+    handleLed(333);
+    Serial.print("Starting STA in ssid: ");
+    Serial.println(ssid);
+    WiFi.begin(ssid, pass);
+    lastWifiScan = millis();
   } else {
     Serial.println("\nSSID invalido. STA bloqueado.");
-    setLedBlink(0);
+    handleLed(-1);
     digitalWrite(LED_PIN, LOW);
   }
-
+  dht.begin();
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, saveConfig);
   server.on("/saveIP", HTTP_POST, saveMqttIp);
@@ -487,35 +527,69 @@ void setup() {
 }
 
 void loop() {
+
   server.handleClient();
-  if (isConfigured() && validSSID()) {
-    if (WiFi.status() != WL_CONNECTED) {
-      handleLed(1500);
-      if (millis() - lastWifiScan > 7500) {
+
+  if ((!isConfigured() || !validSSID()) && !invalidConfig) {
+    invalidConfig = true;
+    Serial.println("No configured or invalid ssid.");
+    return;
+  }
+  // ---- WIFI ----
+  if (WiFi.status() != WL_CONNECTED) {
+    if (staSuccess) {
+      staSuccess = false;
+      mqttStarted = false;
+      mqttReady = false;
+    }
+    handleLed(1000);
+
+    if (millis() - lastWifiScan > 10000) {
+      if (!isNetworkAvailable()) {
+        Serial.println("Network unavailable.");
         lastWifiScan = millis();
-        if (isNetworkAvailable()) {
-          Serial.println("Target ssid found. Retrying STA...");
-          startSTA();
-        } else {
-          Serial.println("Target SSID not found");
-        }
+        return;
       }
-    } else {
-      if (!mqtt.connected()) {
-        initMqtt();
-        handleLed(3000);
-        if (millis() - lastMqttTry > 5000) {
-          lastMqttTry = millis();
-          if (mqtt.connect(deviceId, MQTT_USER, MQTT_PASS)) {
-            mqtt.subscribe(MQTT_TOPIC);
-            mqttReady = true;
-            Serial.println("MQTT connected");
-            handleLed(-1);
-          }
-        }
-      } else {
-        mqtt.loop();
+      Serial.println("Retrying WiFi.");
+      Serial.printf("Current status: %d\n", WiFi.status());
+      WiFi.printDiag(Serial);
+      WiFi.disconnect(true);
+      delay(100);
+      WiFi.begin(ssid, pass);
+      Serial.println("STA attempt started...");
+      lastWifiScan = millis();
+    }
+
+    return;
+  } else if (!staSuccess) {
+    staSuccess = true;
+    invalidConfig = false;
+    Serial.println("WiFi STA connected.");
+  }
+
+  // ---- MQTT ----
+  if (!mqtt.connected()) {
+    if (!mqttStarted) {
+      mqttStarted = true;
+      initMqtt();
+    }
+    handleLed(2000);
+
+    if (millis() - lastMqttTry > 5000) {
+      lastMqttTry = millis();
+
+      if (mqtt.connect(deviceId, MQTT_USER, MQTT_PASS)) {
+        mqtt.subscribe(MQTT_TOPIC);
+        mqttReady = true;
+        Serial.println("MQTT connected");
+        handleLed(-1);
       }
     }
+
+    return;  // no continuar si no hay mqtt
   }
+
+  // ---- ESTADO ESTABLE ----
+  mqtt.loop();
+  dht11Read();
 }
