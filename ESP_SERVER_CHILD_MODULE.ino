@@ -589,7 +589,7 @@ void loop() {
     return;  // no continuar si no hay mqtt
   }
 
-  // ---- ESTADO ESTABLE ----
+  // #### ESTADO ESTABLE ####
   mqtt.loop();
   dht11Read();
 }
